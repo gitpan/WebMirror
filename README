@@ -1,0 +1,7 @@
+This is Fefe's WebMirror program.
+It can recursively mirror remote WWW sites to a local directory,
+adjusting links while doing so so you can browse the files
+locally.
+WebMirror can be ordered to follow outbound links 1 level deep
+without saving them, so it can be used to verify the correctness
+of links in a hierarchy, too.

@@ -1,0 +1,221 @@
+#! /usr/bin/perl
+use LWP::UserAgent;
+require HTML::Parse;
+require HTML::FormatText;
+use HTML::Entities;
+use Getopt::Long;
+use File::Path;
+use HTTP::Date qw(time2str str2time);
+#use LWP::Debug qw(+);
+
+=head1 NAME
+
+webmirror - Simple WWW mirror program
+
+=head1 SYNOPSIS
+
+  webmirror [--from URL] [--to directory] [--proxy] [--checklinks]
+	    [--verbose]
+
+=head1 DESCRIPTION
+
+This program can be used to mirror parts of WWW servers to a local
+directory.  The traversal of the remote pages is recursive, that is,
+linked pages are mirrored, too, if they start with the same prefix.  For
+example, if you mirror C<http://www.math.fu-berlin.de/~leitner/perl/>,
+then C<http://www.math.fu-berlin.de/~leitner/perl/webmirror> would be
+mirrored, too, but C<http://www.math.fu-berlin.de/~leitner/> would not.
+These are the meanings of the options:
+
+=over 4
+
+=item --from <URL>
+
+Where to mirror from.  This has to be an HTTP URL.
+
+=item --to <directory>
+
+Where to put the mirrored files.
+
+=item --proxy
+
+Use the WWW proxy settings from the environment (http_proxy, no_proxy).
+You should not use this if your proxy is a caching proxy, only if it is
+a firewall proxy.  Otherwise you may mirror old versions of the pages.
+
+=item --checklinks
+
+Check not only links that have the same prefix but one level of other
+links, too.  This is very useful for checking your own pages for invalid
+outbound links.
+
+=item --verbose
+
+Print debugging information.
+
+=back
+
+=head1 DIAGNOSTICS
+
+webmirror normally prints only errors, for example:
+
+  Getting http://www.math.fu-berlin.de/~leitner/mutt/idnex.html
+  Error: 404 not found
+  Linked from: http://www.math.fu-berlin.de/~leitner/index.html
+
+=head1 SEE ALSO
+
+L<lwp-mirror>, L<LWP>, L<lwp-request>, L<mirror>
+
+=head1 COPYRIGHT
+
+webmirror is Copyright (c) 1996 Felix von Leitner. All rights reserved.
+libwww-perl is Copyright (c) 1995, 1996 Gisle Aas. All rights reserved.
+
+This program is free software; you can redistribute it and/or
+modify it under the same terms as Perl itself.
+
+=cut
+
+&GetOptions(
+	"from=s" => \$from,
+	"to=s" => \$to,
+	"proxy!" => \$proxy,
+	"checklinks!" => \$checklinks,
+	"verbose!" => \$verbose);
+if ($#ARGV==1) {
+  $from = shift(@ARGV);
+  $to = shift(@ARGV);
+}
+if ($#ARGV==0) {
+  if (length($from)) {
+    $to = shift(@ARGV);
+  } else {
+    $from = shift(@ARGV);
+  }
+}
+if (not defined $from) {
+  print "Syntax: $0 [--from URL] [--to DIRECTORY] [--proxy] [--verbose] [--checklinks]\n";
+  exit 0;
+}
+$to =~ s/^\~/$ENV{HOME}/;
+#$baseurl=$from;
+$ua = new LWP::UserAgent;
+$ua->agent("Fefe-Mini-Mirror/0.1 " . $ua->agent);
+$ua->env_proxy if ($proxy);
+push @links,$from;
+push @linkedfrom,"command line";
+$num=0;
+while ($url = shift @links) {
+  $linkedfrom = shift @linkedfrom;
+  next if (exists $history{$url});
+  $history{$url}=1;
+  print STDERR "Getting $url\n" if ($verbose);
+  $req = new HTTP::Request 'GET' => $url;
+  if (not defined $baseurl) {
+    $baseurl = $url;
+    $baseurl =~ s,[^/]+$,, if ($baseurl =~ m,[^/]$,);
+    print "Setting baseurl to $baseurl\n" if ($verbose);
+  }
+  if ($url =~ m,^$baseurl,) {
+    my $rel=$url; $rel=~s/^$baseurl//;
+    $rel .= "/index.html" if ($rel=~m,/$, or $rel eq "");
+# print STDERR "  relative URL is $rel\n";
+    $dest = "$to/$rel"; $dest =~ s,//,/,g;
+# print STDERR "  destination is $dest\n";
+    if (($dev,$ino,$mode,$nlink,$uid,$gid,$rdev,$size,
+	$atime,$mtime,$ctime,$blksize,$blocks) = stat($dest)) {
+      $req->header('If-Modified-Since', time2str($mtime));
+      print "  If-Modified-Since: ",time2str($mtime),"\n" if ($verbose);
+    }
+  }
+  $res = $ua->request($req);  $success=$res->is_success;
+  if (not $url =~ m,^$baseurl,) {
+    if ($res->content =~ m/\<(moved|please update)\>/) {
+      print STDERR "Getting $url\n" if (not $verbose);
+      print STDERR "  Error: page moved!\n";
+      print STDERR "  Linked from: $linkedfrom\n";
+      next;
+    }
+    next if ($success);
+  }
+  if ($res->code == 500 or $res->code == 304) {	# Kludge!
+    $success=1; $needtosave=0;
+    open FILE,$dest || die;
+    read FILE,$content,10*1024*1024;
+    close FILE;
+    $base="$baseurl$rel";
+    #print "  Base: $base\n";
+    $mimetype="unknown";
+    $mimetype="text/html" if ($dest =~ m/\.html?$/);
+#    print STDERR "Content-Type: $mimetype\n";
+  } else {
+    $content=$res->content;
+    $needtosave=1;
+    $mimetype=$res->header('Content-type');
+#    print STDERR "Content-Type: $mimetype\n";
+    $time=$res->header('Last-Modified');
+    if (defined $time) {
+      $time=str2time($time);
+#     print "  Last-Modified: $time\n" if ($verbose);
+    }
+  }
+  if ($success) {
+    my $rel=$url; $rel=~s/^$baseurl//;
+    $rel .= "/index.html" if ($rel=~m,/$, or $rel eq "");
+    $dest = "$to/$rel"; $dest =~ s,//,/,g;
+    #print STDERR "  relative URL is $rel\n";
+    { my $localdest=$dest;
+      $localdest =~ s,^$ENV{HOME},~,;
+      print STDERR "  Saving to $localdest\n" if ($verbose and $needtosave);
+    }
+    {
+      my $path=$dest; $path =~ s,/[^/]+$,,;
+      mkpath($path);
+    }
+    if ($needtosave) {
+      {
+        my @tags = split(/</,$content);
+	foreach $i (@tags) {
+	  $i =~ s,$baseurl/*,/,;
+	  $i =~ s,="",="index.html",;
+	  $i =~ s,=(\s|>),=index.html$1,;
+	}
+	$content = join('<',@tags);
+      }
+      open FILE,">$dest" || die;
+      print FILE $content;
+      close FILE;
+      utime $time,$time,$dest;
+      $base = $res->base;
+    } else {
+      print "  Not modified, not saving\n" if ($verbose);
+    }
+    my $html = HTML::Parse::parse_html($content);
+#    print "  Base: $base\n";
+    print STDERR "  Content-Type: $mimetype\n" if ($verbose);
+    if ($mimetype =~ m,^text/html$,) {
+      for ( @{ $html->extract_links } ) {
+	my($link, $elem) = @$_;
+	my $tag = uc $elem->tag;
+#	print "  Link: $link -> \n";
+	$link = new URI::URL $link, $res->base;
+#	print $link->abs->as_string,"\n";
+#	print STDERR "  found ",$link->abs->as_string,"\n";
+	my $Link = $link->abs->as_string;
+	$Link =~ s/#.*$//;
+	if ($Link =~ m/$baseurl/ or $checklinks) {
+	  next if ($Link =~ m/^(mailto|news):/i);
+	  push @links,$Link;
+	  push @linkedfrom,$url;
+	}
+      }
+    }
+#  print content;
+  } else {
+    print STDERR "Getting $url\n" if (not $verbose);
+    print STDERR "  Error: " . $res->code . " " . $res->message,"\n";
+    print STDERR "  Linked from: $linkedfrom\n";
+  }
+}
+
